@@ -3,8 +3,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import 'dart:async';
-import '../../services/rider_service.dart';
-import '../../services/test_data_service.dart';
+import '../../services/api_service.dart';
 import '../profile/profile_screen.dart';
 import '../trips/trips_screen.dart';
 import '../promotions/promotions_screen.dart';
@@ -30,9 +29,9 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _locationLoaded = false;
   bool _isLoadingLocation = false;
   Set<Marker> _markers = {};
-  List<RiderData> _nearbyRiders = [];
+  List<Map<String, dynamic>> _nearbyRiders = [];
   bool _isLoadingRiders = false;
-  final RiderService _riderService = RiderService();
+  final ApiService _apiService = ApiService();
   
   // Location selection mode
   bool _isLocationSelectionMode = false;
@@ -62,21 +61,28 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      final riders = await _riderService.getNearbyRiders(
+      final response = await _apiService.getNearbyRiders(
         userLocation: _userLocation,
-        radiusKm: 50.0,
+        radius: 50.0,
       );
       
-      setState(() {
-        _nearbyRiders = riders;
+      if (response['success'] == true && response['riders'] != null) {
+        setState(() {
+          _nearbyRiders = List<Map<String, dynamic>>.from(response['riders']);
         _isLoadingRiders = false;
       });
       
       _updateMarkersWithRiders();
-      
+      } else {
+        setState(() {
+          _nearbyRiders = [];
+          _isLoadingRiders = false;
+        });
+      }
     } catch (e) {
       print('Error loading nearby riders: $e');
       setState(() {
+        _nearbyRiders = [];
         _isLoadingRiders = false;
       });
     }
@@ -191,11 +197,14 @@ class _HomeScreenState extends State<HomeScreen> {
     for (var rider in _nearbyRiders) {
       markers.add(
         Marker(
-          markerId: MarkerId('rider_${rider.id}'),
-          position: rider.currentLocation,
+          markerId: MarkerId('rider_${rider['id']}'),
+          position: LatLng(
+            rider['currentLocation']['latitude'],
+            rider['currentLocation']['longitude'],
+          ),
           infoWindow: InfoWindow(
-            title: rider.nomComplet,
-            snippet: '⭐ ${rider.ratingAverage.toStringAsFixed(1)} • ${rider.distanceKm.toStringAsFixed(1)}km away',
+            title: rider['nomComplet'],
+            snippet: '⭐ ${rider['ratingAverage'].toStringAsFixed(1)} • ${rider['distanceKm'].toStringAsFixed(1)}km away',
           ),
             icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
           onTap: () => _showRiderDetails(rider),
@@ -208,7 +217,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  void _showRiderDetails(RiderData rider) {
+  void _showRiderDetails(Map<String, dynamic> rider) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -251,7 +260,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        rider.nomComplet,
+                        rider['nomComplet'],
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
@@ -263,13 +272,13 @@ class _HomeScreenState extends State<HomeScreen> {
                           const Icon(Icons.star, color: Colors.orange, size: 16),
                           const SizedBox(width: 4),
                           Text(
-                            rider.ratingAverage.toStringAsFixed(1),
+                            rider['ratingAverage'].toStringAsFixed(1),
                             style: const TextStyle(fontWeight: FontWeight.w500),
                           ),
                           const SizedBox(width: 16),
                           const Icon(Icons.location_on, color: Colors.grey, size: 16),
                           const SizedBox(width: 4),
-                          Text('${rider.distanceKm.toStringAsFixed(1)} km away'),
+                          Text('${rider['distanceKm'].toStringAsFixed(1)} km away'),
                         ],
                       ),
                     ],
@@ -286,7 +295,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   // Here you could implement booking with specific rider
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
-                      content: Text('Requesting ride from ${rider.nomComplet}...'),
+                      content: Text('Requesting ride from ${rider['nomComplet']}...'),
                       backgroundColor: const Color(0xFF32C156),
                     ),
                   );
@@ -318,18 +327,29 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!_isLocationSelectionMode) return;
 
     try {
-      // Get address from coordinates
-      List<Placemark> placemarks = await placemarkFromCoordinates(
-        position.latitude,
-        position.longitude,
-      );
+      // Use API service for reverse geocoding
+      final response = await _apiService.reverseGeocode(position);
       
       String address = 'Selected Location';
-      if (placemarks.isNotEmpty) {
-        final placemark = placemarks.first;
-        address = '${placemark.street ?? ''}, ${placemark.locality ?? ''}'.trim();
-        if (address == ', ') {
-          address = placemark.name ?? 'Selected Location';
+      if (response['success'] == true && response['address'] != null) {
+        address = response['address']['short'] ?? response['address']['formatted'] ?? 'Selected Location';
+      } else {
+        // Fallback to local geocoding
+        try {
+          List<Placemark> placemarks = await placemarkFromCoordinates(
+            position.latitude,
+            position.longitude,
+          );
+          
+          if (placemarks.isNotEmpty) {
+            final placemark = placemarks.first;
+            address = '${placemark.street ?? ''}, ${placemark.locality ?? ''}'.trim();
+            if (address == ', ') {
+              address = placemark.name ?? 'Selected Location';
+            }
+          }
+        } catch (e) {
+          print('Fallback geocoding error: $e');
         }
       }
 
@@ -363,6 +383,9 @@ class _HomeScreenState extends State<HomeScreen> {
       await Future.delayed(const Duration(milliseconds: 1500));
       _returnToBooking();
       
+    } on ApiException catch (e) {
+      print('API error getting address: ${e.message}');
+      // Continue with default address
     } catch (e) {
       print('Error getting address: $e');
       ScaffoldMessenger.of(context).showSnackBar(

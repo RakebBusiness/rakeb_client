@@ -1,16 +1,17 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'api_service.dart';
 import '../models/auth_state.dart';
 
 class AuthService extends ChangeNotifier {
-  final SupabaseClient _supabase = Supabase.instance.client;
+  final ApiService _apiService = ApiService();
   AppAuthState _state = const AppAuthState();
   bool _isInitialized = false;
+  Map<String, dynamic>? _currentUser;
 
   AppAuthState get state => _state;
-  User? get currentUser => _supabase.auth.currentUser;
-  bool get isAuthenticated => currentUser != null;
+  Map<String, dynamic>? get currentUser => _currentUser;
+  bool get isAuthenticated => _currentUser != null;
   bool get isInitialized => _isInitialized;
 
   AuthService() {
@@ -18,44 +19,11 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<void> _initialize() async {
-    _supabase.auth.onAuthStateChange.listen((data) {
-      final AuthChangeEvent event = data.event;
-      final Session? session = data.session;
-      
-      if (event == AuthChangeEvent.signedIn && session != null) {
-        _updateState(_state.copyWith(
-          status: AppAuthStatus.authenticated,
-          userId: session.user.id,
-        ));
-      } else if (event == AuthChangeEvent.signedOut) {
-        _updateState(_state.copyWith(status: AppAuthStatus.unauthenticated));
-      }
-    });
-    
-    // Check initial auth state
-    await _checkInitialAuthState();
+    // Check if user is already authenticated (e.g., from stored token)
+    // This would typically involve checking stored credentials
+    _updateState(_state.copyWith(status: AppAuthStatus.unauthenticated));
     _isInitialized = true;
     notifyListeners();
-  }
-
-  Future<void> _checkInitialAuthState() async {
-    try {
-      // Add a small delay to ensure Supabase is fully initialized
-      await Future.delayed(const Duration(milliseconds: 100));
-      
-      final session = _supabase.auth.currentSession;
-      if (session != null) {
-        _updateState(_state.copyWith(
-          status: AppAuthStatus.authenticated,
-          userId: session.user.id,
-        ));
-      } else {
-        _updateState(_state.copyWith(status: AppAuthStatus.unauthenticated));
-      }
-    } catch (e) {
-      print('Error checking initial auth state: $e');
-      _updateState(_state.copyWith(status: AppAuthStatus.unauthenticated));
-    }
   }
 
   void _updateState(AppAuthState newState) {
@@ -67,51 +35,27 @@ class AuthService extends ChangeNotifier {
     try {
       _updateState(_state.copyWith(status: AppAuthStatus.loading));
 
-      // Format phone number properly for Algeria (+213)
-      String formattedPhone = phoneNumber;
+      final response = await _apiService.requestOTP(phoneNumber);
       
-      // Clean the phone number first (remove spaces, dashes, etc.)
-      String cleanPhone = phoneNumber.replaceAll(RegExp(r'[\s\-\(\)]'), '');
-      
-      // Format for Algeria (+213)
-      if (cleanPhone.startsWith('+213')) {
-        // Already has country code, just clean it
-        formattedPhone = cleanPhone;
-      } else if (cleanPhone.startsWith('213')) {
-        // Has country code without +
-        formattedPhone = '+$cleanPhone';
-      } else if (cleanPhone.startsWith('0')) {
-        // Local format: 0512345678 -> +213512345678
-        formattedPhone = '+213${cleanPhone.substring(1)}';
-      } else if (cleanPhone.length == 9 && (cleanPhone.startsWith('5') || cleanPhone.startsWith('6') || cleanPhone.startsWith('7'))) {
-        // Already without leading 0: 512345678 -> +213512345678
-        formattedPhone = '+213$cleanPhone';
+      if (response['success'] == true) {
+        _updateState(_state.copyWith(
+          status: AppAuthStatus.codeSent,
+          phoneNumber: response['phoneNumber'],
+        ));
+        print('OTP sent successfully');
       } else {
-        // Default case - assume it needs +213
-        formattedPhone = '+213$cleanPhone';
-      }
-      
-      // Validate the final format
-      if (!RegExp(r'^\+213[567]\d{8}$').hasMatch(formattedPhone)) {
         _updateState(_state.copyWith(
           status: AppAuthStatus.error,
-          error: 'Format de numéro invalide. Utilisez: 05XXXXXXXX, 06XXXXXXXX ou 07XXXXXXXX',
+          error: response['message'] ?? 'Failed to send OTP',
         ));
-        return;
       }
-
-      print('Attempting to send OTP to: $formattedPhone');
-
-      await _supabase.auth.signInWithOtp(
-        phone: formattedPhone,
-      );
+    } on ApiException catch (e) {
+      print('Request OTP API error: ${e.toString()}');
 
       _updateState(_state.copyWith(
-        status: AppAuthStatus.codeSent,
-        phoneNumber: formattedPhone,
+        status: AppAuthStatus.error,
+        error: e.message,
       ));
-
-      print('OTP sent successfully');
     } catch (e) {
       print('Request OTP error: ${e.toString()}');
       _updateState(_state.copyWith(
@@ -133,23 +77,26 @@ class AuthService extends ChangeNotifier {
         return;
       }
 
-      final AuthResponse response = await _supabase.auth.verifyOTP(
-        type: OtpType.sms,
-        token: smsCode,
-        phone: _state.phoneNumber!,
-      );
-
-      if (response.user != null) {
+      final response = await _apiService.verifyOTP(_state.phoneNumber!, smsCode);
+      
+      if (response['success'] == true && response['user'] != null) {
+        _currentUser = response['user'];
         _updateState(_state.copyWith(
           status: AppAuthStatus.verified,
-          userId: response.user!.id,
+          userId: response['user']['id'],
         ));
       } else {
         _updateState(_state.copyWith(
           status: AppAuthStatus.error,
-          error: 'Échec de la vérification',
+          error: response['message'] ?? 'Échec de la vérification',
         ));
       }
+    } on ApiException catch (e) {
+      print('Verify OTP API error: ${e.toString()}');
+      _updateState(_state.copyWith(
+        status: AppAuthStatus.error,
+        error: e.message,
+      ));
     } catch (e) {
       print('Verify OTP error: ${e.toString()}');
       _updateState(_state.copyWith(
@@ -161,11 +108,17 @@ class AuthService extends ChangeNotifier {
 
   Future<void> updateUserProfile(String displayName) async {
     try {
-      await _supabase.auth.updateUser(
-        UserAttributes(
-          data: {'display_name': displayName},
-        ),
-      );
+      final response = await _apiService.updateProfile(displayName);
+      
+      if (response['success'] == true && response['user'] != null) {
+        _currentUser = response['user'];
+        notifyListeners();
+      } else {
+        throw Exception(response['message'] ?? 'Failed to update profile');
+      }
+    } on ApiException catch (e) {
+      print('Update profile API error: ${e.toString()}');
+      throw Exception(e.message);
     } catch (e) {
       print('Update profile error: ${e.toString()}');
       throw Exception('Erreur lors de la mise à jour du profil');
@@ -174,12 +127,20 @@ class AuthService extends ChangeNotifier {
 
   Future<void> signOut() async {
     try {
-      await _supabase.auth.signOut();
+      await _apiService.signOut();
+      _currentUser = null;
+      _updateState(const AppAuthState(status: AppAuthStatus.unauthenticated));
+    } on ApiException catch (e) {
+      print('Sign out API error: ${e.toString()}');
+      // Even if API call fails, clear local state
+      _currentUser = null;
       _updateState(const AppAuthState(status: AppAuthStatus.unauthenticated));
     } catch (e) {
+      print('Sign out error: ${e.toString()}');
+      // Clear local state even on error
+      _currentUser = null;
       _updateState(_state.copyWith(
-        status: AppAuthStatus.error,
-        error: 'Erreur de déconnexion: ${e.toString()}',
+        status: AppAuthStatus.unauthenticated,
       ));
     }
   }
@@ -188,23 +149,4 @@ class AuthService extends ChangeNotifier {
     _updateState(_state.copyWith(error: null));
   }
 
-  String _getErrorMessage(dynamic error) {
-    if (error is AuthException) {
-      switch (error.message.toLowerCase()) {
-        case 'invalid phone number':
-          return 'Le numéro de téléphone est invalide';
-        case 'too many requests':
-          return 'Trop de tentatives. Réessayez plus tard';
-        case 'invalid otp':
-        case 'token has expired':
-          return 'Code de vérification invalide ou expiré';
-        case 'phone not confirmed':
-          return 'Numéro de téléphone non confirmé';
-        default:
-          return 'Erreur d\'authentification: ${error.message}';
-      }
-    }
-    
-    return 'Une erreur est survenue: ${error.toString()}';
-  }
 }

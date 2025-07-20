@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'dart:async';
+import '../../services/api_service.dart';
 import '../home/home_screen.dart';
 
 class RideBookingScreen extends StatefulWidget {
@@ -32,6 +30,7 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
   final TextEditingController _destinationController = TextEditingController();
   final FocusNode _startFocusNode = FocusNode();
   final FocusNode _destinationFocusNode = FocusNode();
+  final ApiService _apiService = ApiService();
   
   LatLng? _startLocation;
   LatLng? _destinationLocation;
@@ -118,77 +117,22 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
     });
 
     try {
-      // Using Google Places API for location search with bias towards Algeria
-      final response = await http.get(
-        Uri.parse(
-          'https://maps.googleapis.com/maps/api/place/textsearch/json?'
-          'query=${Uri.encodeComponent(query)}&'
-          'location=36.7538,3.0588&'
-          'radius=100000&'
-          'region=dz&'
-          'key=YOUR_GOOGLE_MAPS_API_KEY'
-        ),
-        headers: {
-          'User-Agent': 'RakibApp/1.0',
-        },
+      // Reference location for search context
+      LatLng referenceLocation;
+      if (isStart) {
+        referenceLocation = widget.currentLocation ?? const LatLng(36.7538, 3.0588);
+      } else {
+        referenceLocation = _startLocation ?? widget.currentLocation ?? const LatLng(36.7538, 3.0588);
+      }
+      
+      final response = await _apiService.searchLocations(
+        query,
+        userLocation: referenceLocation,
       );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final results = data['results'] as List<dynamic>;
-        
-        // Reference location for distance calculation
-        LatLng referenceLocation;
-        if (isStart) {
-          // For start location, use current location if available
-          referenceLocation = widget.currentLocation ?? const LatLng(36.7538, 3.0588);
-        } else {
-          // For destination, use start location if available, otherwise current location
-          referenceLocation = _startLocation ?? widget.currentLocation ?? const LatLng(36.7538, 3.0588);
-        }
-
-        final suggestions = await Future.wait(
-          results.take(8).map((item) async {
-            final lat = item['geometry']['location']['lat'];
-            final lng = item['geometry']['location']['lng'];
-            final location = LatLng(lat, lng);
-            
-            // Calculate distance from reference point
-            final distance = Geolocator.distanceBetween(
-              referenceLocation.latitude,
-              referenceLocation.longitude,
-              lat,
-              lng,
-            );
-
-            // Get more detailed address information
-            String detailedAddress = item['formatted_address'] ?? '';
-            String businessStatus = '';
-            double? rating;
-            
-            if (item['business_status'] != null) {
-              businessStatus = item['business_status'];
-            }
-            
-            if (item['rating'] != null) {
-              rating = item['rating'].toDouble();
-            }
-
-            return LocationSuggestion(
-              displayName: item['name'] ?? '',
-              latitude: lat,
-              longitude: lng,
-              address: detailedAddress,
-              distance: distance,
-              businessStatus: businessStatus,
-              rating: rating,
-              types: List<String>.from(item['types'] ?? []),
-            );
-          }).toList(),
-        );
-
-        // Sort by distance
-        suggestions.sort((a, b) => a.distance.compareTo(b.distance));
+      
+      if (response['success'] == true && response['suggestions'] != null) {
+        final suggestionsData = response['suggestions'] as List<dynamic>;
+        final suggestions = suggestionsData.map((item) => LocationSuggestion.fromJson(item)).toList();
 
         setState(() {
           if (isStart) {
@@ -202,10 +146,18 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
           }
         });
       } else {
-        throw Exception('Failed to search locations');
+        setState(() {
+          if (isStart) {
+            _isSearchingStart = false;
+            _showStartSuggestions = false;
+          } else {
+            _isSearchingDestination = false;
+            _showDestinationSuggestions = false;
+          }
+        });
       }
-    } catch (e) {
-      print('Search error: $e');
+    } on ApiException catch (e) {
+      print('Search API error: ${e.message}');
       setState(() {
         if (isStart) {
           _isSearchingStart = false;
@@ -218,11 +170,21 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
         }
       });
       
-      // Show error message
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Failed to search locations: ${e.toString()}'),
+            content: Text('Search failed: ${e.message}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      print('Search error: $e');
+      // Handle general errors
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Search error: ${e.toString()}'),
             backgroundColor: Colors.red,
           ),
         );
@@ -245,8 +207,6 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
       }
     });
   }
-
-
 
   void _navigateToMapSelection(bool isStart) {
     Navigator.pushReplacement(
@@ -302,12 +262,11 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
   void _confirmBooking() {
     if (_startLocation != null && _destinationLocation != null) {
       // Calculate distance and estimated time
-      final distance = Geolocator.distanceBetween(
-        _startLocation!.latitude,
-        _startLocation!.longitude,
-        _destinationLocation!.latitude,
-        _destinationLocation!.longitude,
-      );
+      // For now, we'll use a simple calculation
+      // In production, you'd use the route calculation API
+      final latDiff = _startLocation!.latitude - _destinationLocation!.latitude;
+      final lngDiff = _startLocation!.longitude - _destinationLocation!.longitude;
+      final distance = (latDiff * latDiff + lngDiff * lngDiff) * 111000; // Rough conversion to meters
       
       final distanceKm = (distance / 1000);
       final estimatedTimeMinutes = (distanceKm * 3).round(); // Assuming 20km/h average speed
@@ -383,13 +342,17 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Ride booked successfully! Looking for nearby drivers...'),
-                    backgroundColor: Color(0xFF32C156),
-                  ),
-                );
+                // Create trip via API
+                _createTrip().then((_) {
+                  Navigator.pop(context);
+                }).catchError((error) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Failed to book ride: $error'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                });
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF32C156),
@@ -403,6 +366,28 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please select both pickup and destination locations')),
       );
+    }
+  }
+
+  Future<void> _createTrip() async {
+    try {
+      final response = await _apiService.createTrip(
+        pickupLocation: _startLocation!,
+        pickupAddress: _startController.text,
+        destinationLocation: _destinationLocation!,
+        destinationAddress: _destinationController.text,
+      );
+      
+      if (response['success'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Ride booked successfully! Looking for nearby drivers...'),
+            backgroundColor: Color(0xFF32C156),
+          ),
+        );
+      }
+    } catch (e) {
+      throw Exception('Failed to create trip: $e');
     }
   }
 
@@ -892,6 +877,7 @@ class LocationSuggestion {
   final String businessStatus;
   final double? rating;
   final List<String> types;
+  final String icon;
 
   LocationSuggestion({
     required this.displayName,
@@ -902,5 +888,20 @@ class LocationSuggestion {
     this.businessStatus = '',
     this.rating,
     this.types = const [],
+    this.icon = 'location',
   });
+  
+  factory LocationSuggestion.fromJson(Map<String, dynamic> json) {
+    return LocationSuggestion(
+      displayName: json['displayName'] ?? '',
+      latitude: json['latitude']?.toDouble() ?? 0.0,
+      longitude: json['longitude']?.toDouble() ?? 0.0,
+      address: json['address'] ?? '',
+      distance: json['distance']?.toDouble() ?? 0.0,
+      businessStatus: json['businessStatus'] ?? '',
+      rating: json['rating']?.toDouble(),
+      types: List<String>.from(json['types'] ?? []),
+      icon: json['icon'] ?? 'location',
+    );
+  }
 }

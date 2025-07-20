@@ -43,8 +43,7 @@ class _OtpScreenState extends State<OtpScreen> {
     if (authState.status == AppAuthStatus.verified) {
       // Check if user needs to complete profile
       final user = context.read<AuthService>().currentUser;
-      if (user?.userMetadata?['display_name'] == null || 
-          user!.userMetadata!['display_name']?.toString().isEmpty == true) {
+      if (user?['displayName'] == null || user!['displayName']?.toString().isEmpty == true) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (context) => const UsernameScreen()),
